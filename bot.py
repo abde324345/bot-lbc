@@ -1,23 +1,24 @@
-"""Bot Leboncoin -> Discord. Tourne tout seul sur GitHub Actions (un passage par lancement)."""
+"""Bot Vinted -> Discord. Tourne sur GitHub Actions (un passage par lancement)."""
 import json
 import os
-import re
 import statistics
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 from playwright.sync_api import sync_playwright
 
-# ============== A MODIFIER (directement sur GitHub) ==============
-# Une recherche = UN modèle précis. Colle l'URL copiée depuis Leboncoin.
+# ============== A MODIFIER ==============
+# Nom affiché : mot(s) recherché(s). Un modèle précis par ligne.
 RECHERCHES = {
-    "PS5": "https://www.leboncoin.fr/recherche?text=ps5&sort=time&order=desc",
+    "Air Force 1": "nike air force 1",
+    "Jordan 1": "air jordan 1",
 }
-REMISE_MIN = 0.25       # au moins 25 % sous la médiane
-MARGE_MIN_EUROS = 30    # marge nette minimale
-FRAIS_REVENTE = 0.05    # commission estimée
-FRAIS_FIXES = 8         # envoi, emballage
-# =================================================================
+REMISE_MIN = 0.30       # au moins 30 % sous la médiane
+MARGE_MIN_EUROS = 15    # marge minimale
+FRAIS_REVENTE = 0.0     # Vinted ne prend rien au vendeur
+FRAIS_FIXES = 3         # emballage, etc.
+# ========================================
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 SEEN = Path("seen.json")
@@ -28,31 +29,39 @@ def discord(texte):
     requests.post(WEBHOOK, json={"content": texte}, timeout=15)
 
 
-def recuperer(page, url):
-    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+def recuperer(page, texte):
+    page.goto("https://www.vinted.fr", wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(3000)
-    m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page.content(), re.S)
-    if not m:
-                raise RuntimeError(f"Pas de données. Titre : {page.title()!r} | début : {page.content()[:300]!r}")
-    ads = json.loads(m.group(1))["props"]["pageProps"]["searchData"]["ads"]
+    url = (
+        "https://www.vinted.fr/api/v2/catalog/items"
+        f"?search_text={quote(texte)}&order=newest_first&per_page=96"
+    )
+    r = page.context.request.get(url, headers={"Accept": "application/json"})
+    if r.status != 200:
+        raise RuntimeError(f"Vinted a répondu {r.status} : {r.text()[:200]!r}")
     out = []
-    for ad in ads:
-        prix = ad.get("price")
-        prix = prix[0] if isinstance(prix, list) and prix else prix
-        if prix:
-            out.append({
-                "id": str(ad["list_id"]),
-                "titre": ad.get("subject", ""),
-                "prix": float(prix),
-                "url": ad.get("url") or f"https://www.leboncoin.fr/ad/x/{ad['list_id']}",
-                "ville": (ad.get("location") or {}).get("city", ""),
-            })
+    for it in r.json().get("items", []):
+        prix = it.get("price")
+        if isinstance(prix, dict):
+            prix = prix.get("amount")
+        try:
+            prix = float(prix)
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "id": str(it["id"]),
+            "titre": it.get("title", ""),
+            "prix": prix,
+            "marque": it.get("brand_title", ""),
+            "taille": it.get("size_title", ""),
+            "url": it.get("url") or f"https://www.vinted.fr/items/{it['id']}",
+        })
     return out
 
 
 def analyser(nom, annonces):
-    prix = [a["prix"] for a in annonces if a["prix"] > 5]
-    if len(prix) < 8:
+    prix = [a["prix"] for a in annonces if a["prix"] > 3]
+    if len(prix) < 10:
         print(f"[{nom}] pas assez d'annonces ({len(prix)})")
         return
     mediane = statistics.median(prix)
@@ -66,7 +75,7 @@ def analyser(nom, annonces):
             discord(
                 f"🔥 **{nom}** : {a['titre']}\n"
                 f"Prix : **{a['prix']:.0f} €** (médiane {mediane:.0f} €, -{remise*100:.0f} %)\n"
-                f"Marge estimée : ~{marge:.0f} € · 📍 {a['ville']}\n{a['url']}"
+                f"Marge estimée : ~{marge:.0f} € · {a['marque']} · taille {a['taille']}\n{a['url']}"
             )
             print(f"[{nom}] alerte : {a['titre']}")
 
@@ -80,9 +89,9 @@ with sync_playwright() as p:
                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     )
     page = ctx.new_page()
-    for nom, url in RECHERCHES.items():
+    for nom, texte in RECHERCHES.items():
         try:
-            analyser(nom, recuperer(page, url))
+            analyser(nom, recuperer(page, texte))
         except Exception as e:
             erreurs += 1
             print(f"[{nom}] erreur : {e}")
@@ -90,4 +99,4 @@ with sync_playwright() as p:
 
 SEEN.write_text(json.dumps(sorted(vues)[-5000:]))
 if erreurs == len(RECHERCHES):
-    raise SystemExit(1)  # le run apparaît en rouge dans l'onglet Actions
+    raise SystemExit(1)
