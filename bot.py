@@ -33,7 +33,7 @@ def recuperer(page, url):
     page.wait_for_timeout(3000)
     m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page.content(), re.S)
     if not m:
-        raise RuntimeError("Page bloquée par l'anti-bot ou structure changée")
+                raise RuntimeError(f"Pas de données. Titre : {page.title()!r} | début : {page.content()[:300]!r}")
     ads = json.loads(m.group(1))["props"]["pageProps"]["searchData"]["ads"]
     out = []
     for ad in ads:
